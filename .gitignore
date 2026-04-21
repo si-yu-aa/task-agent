@@ -2,5 +2,7 @@ __pycache__/
 .pytest_cache/
 *.py[cod]
 .venv/
+task-agent*.log
+task-agent-langfuse.log
 
 .env

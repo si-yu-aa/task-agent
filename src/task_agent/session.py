@@ -86,6 +86,8 @@ class TaskAgentSession:
                 note="fast brain processing window",
             )
             self._active_task = asyncio.create_task(self._run_fast_brain(generation, window))
+            event_texts = [e.payload.text if hasattr(e.payload, "text") else str(e.payload) for e in window.events]
+            debug(_logger, f"Window submitted: {len(window.events)} events, window_id={window.window_id}, generation={generation}, events={event_texts}")
             obs.update(output={"generation": generation, "active_window_id": window.window_id})
         return SubmitResult(session_id=self.session_id, window_id=window.window_id, generation=generation)
 
@@ -137,6 +139,7 @@ class TaskAgentSession:
                     await task
 
     async def _run_fast_brain(self, generation: int, window: EventWindow) -> None:
+        debug(_logger, f"Fast brain starting, generation={generation}")
         with self.tracer.observation(
             name="task-agent.fast-brain.run",
             as_type="agent",
@@ -151,18 +154,24 @@ class TaskAgentSession:
             await asyncio.sleep(0)
             try:
                 request = FastBrainRequest(window=window, snapshot=self.blackboard.snapshot(), generation=generation)
+                debug(_logger, f"Fast brain calling model, generation={generation}")
                 async for chunk in self.fast_brain.think(request):
                     if generation != self._generation:
+                        debug(_logger, f"Fast brain stale generation={generation}, current={self._generation}, returning")
                         return
+                    debug(_logger, f"Fast brain chunk: kind={chunk.kind}, message={chunk.message!r}")
                     if chunk.kind == "result" and chunk.result is not None:
                         await self._apply_fast_result(generation, window, chunk.result, ack_task, ack_sent)
                     elif chunk.kind in {"status", "message"} and chunk.message:
                         await self._emit(f"fast.{chunk.kind}", chunk.message, generation=generation, window_id=window.window_id)
+                debug(_logger, f"Fast brain stream exhausted, generation={generation}")
                 obs.update(output={"status": "completed", "window_id": window.window_id, "generation": generation})
             except asyncio.CancelledError:
+                debug(_logger, f"Fast brain cancelled, generation={generation}")
                 obs.update(output={"status": "cancelled", "window_id": window.window_id, "generation": generation})
                 raise
             except Exception as exc:
+                error(_logger, f"Fast brain error: {exc}", generation=generation, window_id=window.window_id)
                 obs.update(output={"status": "error", "error": str(exc)})
                 await self._emit("error", f"Fast-brain processing failed: {exc}", generation=generation, window_id=window.window_id)
             finally:
@@ -180,7 +189,9 @@ class TaskAgentSession:
 
     async def _run_acknowledge(self, generation: int, window: EventWindow, ack_sent: asyncio.Event) -> None:
         try:
+            debug(_logger, f"Acknowledge starting, generation={generation}")
             ack = await self._resolve_maybe_async(self.fast_brain.acknowledge(window, self.blackboard.snapshot()))
+            debug(_logger, f"Acknowledge returned: {ack!r}, generation={generation}")
             if generation != self._generation or not ack:
                 return
             await self._send_chat(
@@ -190,10 +201,16 @@ class TaskAgentSession:
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            error(_logger, f"Acknowledge error: {exc}", generation=generation, window_id=window.window_id)
             await self._emit("ack.error", f"Acknowledge failed: {exc}", generation=generation, window_id=window.window_id)
 
     async def _apply_fast_result(self, generation: int, window: EventWindow, result: FastBrainTurnResult, ack_task: asyncio.Task | None, ack_sent: asyncio.Event) -> None:
         """把 fast brain 的结构化结果落到黑板、chat 和 handoff。"""
+        debug(_logger,
+            f"Fast brain result: relation={result.relation.value}, "
+            f"delegate_to_deep={result.delegate_to_deep}, "
+            f"response_text={result.response_text!r}, "
+            f"task_goal={result.task.goal if result.task else None}")
         if ack_task and not ack_task.done() and result.response_text:
             ack_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -251,6 +268,7 @@ class TaskAgentSession:
             deep_task.add_done_callback(self._deep_tasks.discard)
 
     async def _run_deep_brain(self, generation: int, window: EventWindow, intent) -> None:
+        debug(_logger, f"Deep brain starting, generation={generation}, intent_id={intent.intent_id}")
         with self.tracer.observation(
             name="task-agent.deep-brain.run",
             as_type="agent",
@@ -263,15 +281,19 @@ class TaskAgentSession:
             try:
                 async for chunk in self.deep_brain.stream_think(request):
                     if generation != self._generation:
+                        debug(_logger, f"Deep brain stale generation={generation}, discarding chunk")
                         await self._emit("deep.discarded", "A stale deep-planning chunk was discarded.", generation=generation, window_id=window.window_id, intent_id=intent.intent_id)
                         obs.update(output={"status": "discarded", "window_id": window.window_id, "generation": generation})
                         return
                     await self._handle_deep_chunk(generation, window, intent, chunk)
+                debug(_logger, f"Deep brain stream exhausted, generation={generation}")
                 obs.update(output={"status": "completed", "window_id": window.window_id, "generation": generation})
             except asyncio.CancelledError:
+                debug(_logger, f"Deep brain cancelled, generation={generation}")
                 obs.update(output={"status": "cancelled", "window_id": window.window_id, "generation": generation})
                 raise
             except Exception as exc:
+                error(_logger, f"Deep brain error: {exc}", generation=generation, window_id=window.window_id, intent_id=intent.intent_id)
                 obs.update(output={"status": "error", "error": str(exc)})
                 await self._emit("error", f"Deep-brain processing failed: {exc}", generation=generation, window_id=window.window_id, intent_id=intent.intent_id)
             finally:
@@ -291,6 +313,9 @@ class TaskAgentSession:
         - final_summary 写入黑板并可转成对外 final
         - milestone 默认只做内部观测，不直接对外播报
         """
+        msg_preview = repr(chunk.message[:80]) if chunk.message else None
+        task_id = chunk.task.task_id if chunk.task else None
+        debug(_logger, f"Deep chunk: kind={chunk.kind.value}, message={msg_preview}, task_id={task_id}")
         await self._emit(
             f"deep.{chunk.kind.value}",
             chunk.message or chunk.kind.value,

@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import json
 import os
+from dataclasses import dataclass
 from typing import Any, AsyncIterator, Protocol
 
 try:
@@ -19,7 +19,14 @@ try:
 except ImportError:  # pragma: no cover
     OpenAIAsyncOpenAI = None
 
-from task_agent.prompts import DEFAULT_ROLE_PROMPT, build_ack_prompt, build_deep_stream_prompt, build_fast_prompt
+from task_agent.env import load_project_env
+from task_agent.logging_config import debug, get_brains_logger, info
+from task_agent.prompts import (
+    DEFAULT_ROLE_PROMPT,
+    build_ack_prompt,
+    build_deep_stream_prompt,
+    build_fast_prompt,
+)
 from task_agent.types import (
     ChatMessage,
     ChatMessageKind,
@@ -35,24 +42,30 @@ from task_agent.types import (
     TaskStatus,
     make_id,
 )
-from task_agent.env import load_project_env
-from task_agent.logging_config import get_brains_logger, debug, info
 
 _logger = get_brains_logger()
 
 
 class FastBrain(Protocol):
     """快速推理脑协议。"""
+
     def acknowledge(self, window, snapshot) -> str | None: ...
 
-    async def think(self, request: FastBrainRequest) -> AsyncIterator[FastBrainChunk]: ...
+    async def think(
+        self, request: FastBrainRequest
+    ) -> AsyncIterator[FastBrainChunk]: ...
 
-    def react_to_deep_chunk(self, chunk: DeepBrainChunk, snapshot) -> ChatMessage | None: ...
+    def react_to_deep_chunk(
+        self, chunk: DeepBrainChunk, snapshot
+    ) -> ChatMessage | None: ...
 
 
 class DeepBrain(Protocol):
     """深度推理脑协议。"""
-    async def stream_think(self, request: DeepBrainRequest) -> AsyncIterator[DeepBrainChunk]: ...
+
+    async def stream_think(
+        self, request: DeepBrainRequest
+    ) -> AsyncIterator[DeepBrainChunk]: ...
 
 
 @dataclass(slots=True)
@@ -74,17 +87,33 @@ class ModelConfig:
         load_project_env()
         api_key = os.getenv("TASK_AGENT_MODEL_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
-            raise ValueError("Missing TASK_AGENT_MODEL_API_KEY or OPENAI_API_KEY for task-agent model access")
-        base_url = os.getenv("TASK_AGENT_MODEL_BASE_URL") or os.getenv("OPENAI_BASE_URL") or "https://litellm.mybigai.ac.cn/"
+            raise ValueError(
+                "Missing TASK_AGENT_MODEL_API_KEY or OPENAI_API_KEY for task-agent model access"
+            )
+        base_url = (
+            os.getenv("TASK_AGENT_MODEL_BASE_URL")
+            or os.getenv("OPENAI_BASE_URL")
+            or "https://litellm.mybigai.ac.cn/"
+        )
         role_prompt = os.getenv("TASK_AGENT_ROLE_PROMPT") or DEFAULT_ROLE_PROMPT
         config = cls(
             api_key=api_key,
             base_url=base_url,
-            fast_model=os.getenv("TASK_AGENT_FAST_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-nano")),
-            deep_model=os.getenv("TASK_AGENT_DEEP_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-mini")),
+            fast_model=os.getenv(
+                "TASK_AGENT_FAST_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-nano")
+            ),
+            deep_model=os.getenv(
+                "TASK_AGENT_DEEP_MODEL", os.getenv("OPENAI_MODEL", "gpt-5.4-mini")
+            ),
             role_prompt=role_prompt,
         )
-        info(_logger, "ModelConfig loaded", fast_model=config.fast_model, deep_model=config.deep_model, base_url=config.base_url)
+        info(
+            _logger,
+            "ModelConfig loaded",
+            fast_model=config.fast_model,
+            deep_model=config.deep_model,
+            base_url=config.base_url,
+        )
         return config
 
 
@@ -93,12 +122,17 @@ class OpenAICompatibleClient:
 
     当前同时支持普通补全、JSON 输出和流式文本输出。
     """
+
     def __init__(self, config: ModelConfig, tracer=None):
         if OpenAIAsyncOpenAI is None:
-            raise RuntimeError("The 'openai' package is required for model-backed task-agent brains")
+            raise RuntimeError(
+                "The 'openai' package is required for model-backed task-agent brains"
+            )
         self.config = config
         self.tracer = tracer
-        langfuse_client_cls = _load_langfuse_async_client() if getattr(tracer, "enabled", False) else None
+        langfuse_client_cls = (
+            _load_langfuse_async_client() if getattr(tracer, "enabled", False) else None
+        )
         client_cls = langfuse_client_cls or OpenAIAsyncOpenAI
         self._langfuse_enabled = langfuse_client_cls is not None
         self._client = client_cls(
@@ -107,7 +141,17 @@ class OpenAICompatibleClient:
             timeout=config.timeout_seconds,
         )
 
-    async def complete_text(self, *, model: str, system_prompt: str, user_prompt: str, max_tokens: int, request_name: str, metadata: dict[str, Any] | None = None, tags: list[str] | None = None) -> str:
+    async def complete_text(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        request_name: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
         response = await self._client.chat.completions.create(
             model=model,
             temperature=self.config.temperature,
@@ -116,11 +160,27 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            **_request_kwargs(enabled=self._langfuse_enabled, request_name=request_name, metadata=metadata, tags=tags, model=model),
+            **_request_kwargs(
+                enabled=self._langfuse_enabled,
+                request_name=request_name,
+                metadata=metadata,
+                tags=tags,
+                model=model,
+            ),
         )
         return _extract_content(response.choices[0].message.content)
 
-    async def complete_json(self, *, model: str, system_prompt: str, user_prompt: str, max_tokens: int, request_name: str, metadata: dict[str, Any] | None = None, tags: list[str] | None = None) -> str:
+    async def complete_json(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        request_name: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> str:
         response = await self._client.chat.completions.create(
             model=model,
             temperature=self.config.temperature,
@@ -130,11 +190,27 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            **_request_kwargs(enabled=self._langfuse_enabled, request_name=request_name, metadata=metadata, tags=tags, model=model),
+            **_request_kwargs(
+                enabled=self._langfuse_enabled,
+                request_name=request_name,
+                metadata=metadata,
+                tags=tags,
+                model=model,
+            ),
         )
         return _extract_content(response.choices[0].message.content)
 
-    async def stream_text(self, *, model: str, system_prompt: str, user_prompt: str, max_tokens: int, request_name: str, metadata: dict[str, Any] | None = None, tags: list[str] | None = None) -> AsyncIterator[str]:
+    async def stream_text(
+        self,
+        *,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_tokens: int,
+        request_name: str,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> AsyncIterator[str]:
         stream = await self._client.chat.completions.create(
             model=model,
             temperature=self.config.temperature,
@@ -144,7 +220,13 @@ class OpenAICompatibleClient:
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            **_request_kwargs(enabled=self._langfuse_enabled, request_name=request_name, metadata=metadata, tags=tags, model=model),
+            **_request_kwargs(
+                enabled=self._langfuse_enabled,
+                request_name=request_name,
+                metadata=metadata,
+                tags=tags,
+                model=model,
+            ),
         )
         async for chunk in stream:
             if not chunk.choices:
@@ -184,12 +266,18 @@ class ModelFastBrain:
             user_prompt=f"Blackboard snapshot:\n{_format_snapshot(request.snapshot)}\n\nEvent window to interpret:\n{_format_window(request.window)}\n",
             max_tokens=self.config.fast_max_tokens,
             request_name="task-agent.fast-brain.reason",
-            metadata={"window_id": request.window.window_id, "generation": request.generation, "phase": "fast_reasoning"},
+            metadata={
+                "window_id": request.window.window_id,
+                "generation": request.generation,
+                "phase": "fast_reasoning",
+            },
             tags=["task-agent", "fast-brain", "reason"],
         )
         yield FastBrainChunk(kind="result", result=parse_fast_brain_result(raw))
 
-    def react_to_deep_chunk(self, chunk: DeepBrainChunk, snapshot) -> ChatMessage | None:
+    def react_to_deep_chunk(
+        self, chunk: DeepBrainChunk, snapshot
+    ) -> ChatMessage | None:
         kind_map = {
             DeepChunkKind.MILESTONE: ChatMessageKind.PROGRESS,
             DeepChunkKind.STAGE_TASK: ChatMessageKind.STAGE_RESULT,
@@ -198,7 +286,12 @@ class ModelFastBrain:
         }
         if chunk.kind not in kind_map or not chunk.message:
             return None
-        return ChatMessage(kind=kind_map[chunk.kind], text=chunk.message, generation=snapshot.processing.generation, task_id=chunk.task.task_id if chunk.task else None)
+        return ChatMessage(
+            kind=kind_map[chunk.kind],
+            text=chunk.message,
+            generation=snapshot.processing.generation,
+            task_id=chunk.task.task_id if chunk.task else None,
+        )
 
 
 class ModelDeepBrain:
@@ -206,7 +299,9 @@ class ModelDeepBrain:
         self.client = client
         self.config = config
 
-    async def stream_think(self, request: DeepBrainRequest) -> AsyncIterator[DeepBrainChunk]:
+    async def stream_think(
+        self, request: DeepBrainRequest
+    ) -> AsyncIterator[DeepBrainChunk]:
         """流式执行 deep brain，并把标签化文本解析成 chunk。"""
         parser = TaggedStreamParser(intent_id=request.intent.intent_id)
         async for piece in self.client.stream_text(
@@ -219,7 +314,12 @@ class ModelDeepBrain:
             ),
             max_tokens=self.config.deep_max_tokens,
             request_name="task-agent.deep-brain.stream",
-            metadata={"window_id": request.window.window_id, "generation": request.generation, "intent_id": request.intent.intent_id, "phase": "deep_stream"},
+            metadata={
+                "window_id": request.window.window_id,
+                "generation": request.generation,
+                "intent_id": request.intent.intent_id,
+                "phase": "deep_stream",
+            },
             tags=["task-agent", "deep-brain", "stream"],
         ):
             for chunk in parser.feed(piece):
@@ -233,19 +333,31 @@ class HeuristicFastBrain:
         return None
 
     async def think(self, request: FastBrainRequest) -> AsyncIterator[FastBrainChunk]:
-        yield FastBrainChunk(kind="result", result=FastBrainTurnResult(response_text="Model-backed fast brain is not configured."))
+        yield FastBrainChunk(
+            kind="result",
+            result=FastBrainTurnResult(
+                response_text="Model-backed fast brain is not configured."
+            ),
+        )
 
-    def react_to_deep_chunk(self, chunk: DeepBrainChunk, snapshot) -> ChatMessage | None:
+    def react_to_deep_chunk(
+        self, chunk: DeepBrainChunk, snapshot
+    ) -> ChatMessage | None:
         return None
 
 
 class HeuristicDeepBrain:
-    async def stream_think(self, request: DeepBrainRequest) -> AsyncIterator[DeepBrainChunk]:
-        yield DeepBrainChunk(kind=DeepChunkKind.FINAL_SUMMARY, message="Deep planning is not configured.")
+    async def stream_think(
+        self, request: DeepBrainRequest
+    ) -> AsyncIterator[DeepBrainChunk]:
+        yield DeepBrainChunk(
+            kind=DeepChunkKind.FINAL_SUMMARY, message="Deep planning is not configured."
+        )
 
 
 class TaggedStreamParser:
     """把 deep brain 的标签化文本流切成结构化 chunk。"""
+
     TAGS = {
         "reasoning": DeepChunkKind.REASONING,
         "milestone": DeepChunkKind.MILESTONE,
@@ -292,7 +404,7 @@ class TaggedStreamParser:
         open_tag = f"<{tag}>"
         inner_start = start + len(open_tag)
         inner = self.buffer[inner_start:close_idx].strip()
-        self.buffer = self.buffer[close_idx + len(close):]
+        self.buffer = self.buffer[close_idx + len(close) :]
         self.saw_structured_output = True
         kind = self.TAGS[tag]
         if kind == DeepChunkKind.STAGE_TASK:
@@ -308,7 +420,9 @@ def parse_fast_brain_result(raw_text: str) -> FastBrainTurnResult:
         intent_summary=_optional_string(payload.get("intent_summary")),
         relation=_parse_intent_relation(payload.get("relation")),
         response_text=_optional_string(payload.get("response_text")),
-        task=_build_task(task_payload, intent_id="") if isinstance(task_payload, dict) else None,
+        task=_build_task(task_payload, intent_id="")
+        if isinstance(task_payload, dict)
+        else None,
         delegate_to_deep=bool(payload.get("delegate_to_deep", False)),
         delegation_message=_optional_string(payload.get("delegation_message")),
     )
@@ -336,7 +450,14 @@ def _reasoning_kwargs_for_model(model: str) -> dict[str, Any]:
     return {}
 
 
-def _request_kwargs(*, enabled: bool, request_name: str, metadata: dict[str, Any] | None, tags: list[str] | None, model: str) -> dict[str, Any]:
+def _request_kwargs(
+    *,
+    enabled: bool,
+    request_name: str,
+    metadata: dict[str, Any] | None,
+    tags: list[str] | None,
+    model: str,
+) -> dict[str, Any]:
     kwargs: dict[str, Any] = {}
     kwargs.update(_reasoning_kwargs_for_model(model))
     if enabled:
@@ -351,7 +472,10 @@ def _extract_content(content: Any) -> str:
     if content is None:
         return ""
     if isinstance(content, list):
-        return "".join(part.get("text", "") if isinstance(part, dict) else str(part) for part in content).strip()
+        return "".join(
+            part.get("text", "") if isinstance(part, dict) else str(part)
+            for part in content
+        ).strip()
     return str(content).strip()
 
 
@@ -397,7 +521,8 @@ def _build_task(payload: dict[str, Any], *, intent_id: str) -> TaskGoalCard:
         task_id=str(payload.get("task_id") or make_id("task")),
         intent_id=intent_id,
         goal=str(payload.get("goal", "")).strip() or "Follow the latest intent",
-        context_summary=str(payload.get("context_summary", "")).strip() or "Generated from model output.",
+        context_summary=str(payload.get("context_summary", "")).strip()
+        or "Generated from model output.",
         constraints=_coerce_string_list(payload.get("constraints")),
         priority=_parse_task_priority(payload.get("priority")),
         completion_criteria=_coerce_string_list(payload.get("completion_criteria")),
@@ -413,7 +538,9 @@ def _build_task(payload: dict[str, Any], *, intent_id: str) -> TaskGoalCard:
 def _load_json_object(raw_text: str) -> dict[str, Any]:
     text = raw_text.strip()
     if text.startswith("```"):
-        lines = [line for line in text.splitlines() if not line.strip().startswith("```")]
+        lines = [
+            line for line in text.splitlines() if not line.strip().startswith("```")
+        ]
         text = "\n".join(lines).strip()
     try:
         payload = json.loads(text)
@@ -421,8 +548,10 @@ def _load_json_object(raw_text: str) -> dict[str, Any]:
         start = text.find("{")
         end = text.rfind("}")
         if start == -1 or end == -1 or end <= start:
-            raise ValueError(f"Model did not return a JSON object: {raw_text}") from None
-        payload = json.loads(text[start:end + 1])
+            raise ValueError(
+                f"Model did not return a JSON object: {raw_text}"
+            ) from None
+        payload = json.loads(text[start : end + 1])
     if not isinstance(payload, dict):
         raise ValueError(f"Model response must decode to an object: {raw_text}")
     return payload
@@ -447,7 +576,18 @@ def _format_window(window) -> str:
 
 
 def _format_snapshot(snapshot) -> str:
-    current_intent = snapshot.current_intent.summary if snapshot.current_intent else "none"
-    tasks = ", ".join(f"{task.task_id}:{task.goal}:{task.status.value}" for task in snapshot.tasks.values()) or "none"
-    summaries = " | ".join(summary.content for summary in snapshot.context_summaries[-3:]) or "none"
+    current_intent = (
+        snapshot.current_intent.summary if snapshot.current_intent else "none"
+    )
+    tasks = (
+        ", ".join(
+            f"{task.task_id}:{task.goal}:{task.status.value}"
+            for task in snapshot.tasks.values()
+        )
+        or "none"
+    )
+    summaries = (
+        " | ".join(summary.content for summary in snapshot.context_summaries[-3:])
+        or "none"
+    )
     return f"current_intent={current_intent}\nprocessing={snapshot.processing.phase.value}\ntasks={tasks}\nrecent_summaries={summaries}"

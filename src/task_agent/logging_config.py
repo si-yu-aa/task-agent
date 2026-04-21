@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import os
-import sys
 from contextvars import ContextVar
 from copy import deepcopy
 from typing import Any
@@ -26,25 +24,22 @@ def get_log_context() -> dict[str, Any]:
 
 
 def _get_level() -> int:
-    level_str = os.getenv("TASK_AGENT_LOG_LEVEL", "").strip().upper()
-    if level_str:
-        return getattr(logging, level_str, logging.INFO)
-    if os.getenv("TASK_AGENT_LOG_DEBUG", "").strip() == "1":
-        return logging.DEBUG
-    return logging.INFO
+    return logging.DEBUG
 
 
 def _configure_root_logger() -> None:
+    import time
     root = logging.getLogger("task_agent")
     if root.handlers:
         return
     level = _get_level()
     root.setLevel(level)
-    handler = logging.StreamHandler(sys.stderr)
-    handler.setLevel(level)
     fmt = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    handler.setFormatter(logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S"))
-    root.addHandler(handler)
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    file_handler = logging.FileHandler(f"task-agent-{ts}.log")
+    file_handler.setLevel(level)
+    file_handler.setFormatter(logging.Formatter(fmt, datefmt="%Y-%m-%d %H:%M:%S"))
+    root.addHandler(file_handler)
 
 
 def get_logger(name: str) -> logging.Logger:
